@@ -24,7 +24,7 @@ except ImportError:
     sys.exit(1)
 
 # ==========================================
-# GO 核心代码区 (已修复格式和编译问题)
+# GO 核心代码区 (已修复 unused variable 错误)
 # ==========================================
 
 # 1. 协议验证器 (Protocol Verifier)
@@ -91,7 +91,7 @@ func worker(jobs <-chan string, timeout time.Duration, wg *sync.WaitGroup, count
 
 func main() {
 	inputFile := flag.String("inputFile", "", "Input File")
-	outputFile := flag.String("outputFile", "", "Output File") // 实际上Python处理输出，Go只管打印
+    // [修复] 删除了未使用的 outputFile 变量，防止Go编译报错
 	threads := flag.Int("threads", 500, "Threads")
 	timeout := flag.Int("timeout", 5, "Timeout")
 	flag.Parse()
@@ -200,7 +200,7 @@ func worker(jobs <-chan string, timeout time.Duration, wg *sync.WaitGroup, count
 
 func main() {
 	inputFile := flag.String("inputFile", "", "Input")
-	outputFile := flag.String("outputFile", "", "Output")
+    // [修复] 删除了未使用的 outputFile 变量，防止Go编译报错
 	threads := flag.Int("threads", 200, "Threads")
 	timeout := flag.Int("timeout", 10, "Timeout")
 	flag.Parse()
@@ -426,6 +426,11 @@ def get_go_path():
     return None
 
 def compile_go_binaries():
+    """
+    编译 Go 二进制文件。
+    [修复] 自动检测 HOME 环境变量，如果缺失（如 Termux）则自动配置，
+    避免 'missing GOCACHE' 或 'HOME not defined' 错误。
+    """
     go_exec = get_go_path()
     if not go_exec:
         print("错误: 未找到 'go' 命令。请先安装 Go 语言环境 (https://go.dev/dl/)。")
@@ -438,6 +443,22 @@ def compile_go_binaries():
         "scanner": GO_SOURCE_CODE_SCANNER
     }
     
+    # --- [修复核心] 配置 Go 编译环境变量 ---
+    build_env = os.environ.copy()
+    
+    # 确定临时目录
+    temp_base = tempfile.gettempdir()
+    
+    # 修复 1: 如果没有 HOME (Termux/Docker)，设置一个
+    if 'HOME' not in build_env:
+        build_env['HOME'] = temp_base
+        
+    # 修复 2: 强制指定 GOCACHE，确保可写
+    # 很多时候即便有 HOME，GOCACHE 默认路径也可能不可写
+    build_env['GOCACHE'] = os.path.join(temp_base, 'go_build_cache')
+    os.makedirs(build_env['GOCACHE'], exist_ok=True)
+    # ----------------------------------
+
     print("正在检查核心组件...")
     for name, code in sources.items():
         out_path = os.path.join(CACHE_DIR, name + (".exe" if sys.platform=="win32" else ""))
@@ -454,10 +475,11 @@ def compile_go_binaries():
             src_path = os.path.join(CACHE_DIR, name + ".go")
             with open(src_path, "w", encoding="utf-8") as f: f.write(code)
             
-            # 调用 Go 编译器
+            # 调用 Go 编译器，传入自定义环境变量
             result = subprocess.run(
                 [go_exec, "build", "-ldflags", "-s -w", "-o", out_path, src_path], 
-                capture_output=True, text=True
+                capture_output=True, text=True,
+                env=build_env # 使用修复后的环境变量
             )
             
             if result.returncode != 0:
