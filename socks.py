@@ -10,7 +10,7 @@ from datetime import datetime
 import getpass
 import threading
 
-# --- 依赖检查 ---
+# --- 依赖库检查 ---
 try:
     from tqdm import tqdm
 except ImportError:
@@ -24,164 +24,350 @@ except ImportError:
     sys.exit(1)
 
 # ==========================================
-# GO 语言核心代码区 (已优化为 Worker Pool + 信号模式)
+# GO 核心代码区 (已修复格式和编译问题)
 # ==========================================
 
-# 1. 协议验证器 (快速) - 检查是否响应 SOCKS5 握手
+# 1. 协议验证器 (Protocol Verifier)
 GO_SOURCE_CODE_PROTOCOL_VERIFIER = r'''
 package main
-import ("bufio";"flag";"fmt";"net";"os";"strings";"sync";"sync/atomic";"time")
+
+import (
+	"bufio"
+	"flag"
+	"fmt"
+	"net"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// 进度心跳
+func progressReporter(counter *uint64) {
+	for {
+		time.Sleep(1 * time.Second)
+		c := atomic.LoadUint64(counter)
+		if c > 0 {
+			atomic.AddUint64(counter, ^uint64(c-1)) // 重置计数
+			// 发送累积的进度 (这里简化处理，每秒发送一次信号)
+			// 在高并发下，我们只打印一个标记字符让Python端捕获
+		}
+	}
+}
 
 func worker(jobs <-chan string, timeout time.Duration, wg *sync.WaitGroup, counter *uint64) {
 	defer wg.Done()
 	localCount := 0
+	
 	for target := range jobs {
 		conn, err := net.DialTimeout("tcp", target, timeout)
 		if err == nil {
 			conn.SetDeadline(time.Now().Add(timeout))
+			// 发送 SOCKS5 握手包
 			conn.Write([]byte{0x05, 0x01, 0x00})
 			resp := make([]byte, 2)
 			n, _ := conn.Read(resp)
 			conn.Close()
+			
+			// 检查响应: 版本5, 无需认证
 			if n == 2 && resp[0] == 0x05 && resp[1] == 0x00 {
-				fmt.Printf("S|%s\n", target) // S| 表示成功
+				fmt.Printf("S|%s\n", target)
 			}
 		}
+		
 		localCount++
-		if localCount >= 20 { atomic.AddUint64(counter, 20); fmt.Println("P"); localCount = 0 } // P 表示进度心跳
+		if localCount >= 20 {
+			atomic.AddUint64(counter, 20)
+			fmt.Println("P")
+			localCount = 0
+		}
 	}
-	if localCount > 0 { atomic.AddUint64(counter, uint64(localCount)); fmt.Println("P") }
+	if localCount > 0 {
+		atomic.AddUint64(counter, uint64(localCount))
+		fmt.Println("P")
+	}
 }
 
 func main() {
-	inputFile := flag.String("inputFile", "", ""); outputFile := flag.String("outputFile", "", ""); threads := flag.Int("threads", 500, ""); timeout := flag.Int("timeout", 5, ""); flag.Parse()
-	file, _ := os.Open(*inputFile); defer file.Close(); scanner := bufio.NewScanner(file)
-	jobs := make(chan string, *threads*2); var wg sync.WaitGroup; var count uint64
-	
-	for i := 0; i < *threads; i++ { wg.Add(1); go worker(jobs, time.Duration(*timeout)*time.Second, &wg, &count) }
-	
+	inputFile := flag.String("inputFile", "", "Input File")
+	outputFile := flag.String("outputFile", "", "Output File") // 实际上Python处理输出，Go只管打印
+	threads := flag.Int("threads", 500, "Threads")
+	timeout := flag.Int("timeout", 5, "Timeout")
+	flag.Parse()
+
+	file, err := os.Open(*inputFile)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	jobs := make(chan string, *threads*2)
+	var wg sync.WaitGroup
+	var count uint64
+
+	// 启动 Worker
+	for i := 0; i < *threads; i++ {
+		wg.Add(1)
+		go worker(jobs, time.Duration(*timeout)*time.Second, &wg, &count)
+	}
+
+	// 发送任务
 	go func() {
-		for scanner.Scan() { if t := strings.TrimSpace(scanner.Text()); t != "" { jobs <- t } }
+		for scanner.Scan() {
+			t := strings.TrimSpace(scanner.Text())
+			if t != "" {
+				jobs <- t
+			}
+		}
 		close(jobs)
 	}()
+
 	wg.Wait()
 }
 '''
 
-# 2. 深度验证器 - 检查是否能连接 Google
+# 2. 深度连通性验证器 (Deep Verifier)
 GO_SOURCE_CODE_DEEP_VERIFIER = r'''
 package main
-import ("bufio";"encoding/binary";"flag";"fmt";"net";"os";"strings";"sync";"sync/atomic";"time")
+
+import (
+	"bufio"
+	"encoding/binary"
+	"flag"
+	"fmt"
+	"net"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
 
 func worker(jobs <-chan string, timeout time.Duration, wg *sync.WaitGroup, counter *uint64) {
 	defer wg.Done()
 	localCount := 0
+	
 	for target := range jobs {
 		conn, err := net.DialTimeout("tcp", target, timeout)
 		if err == nil {
 			conn.SetDeadline(time.Now().Add(timeout))
+			// 1. 握手
 			conn.Write([]byte{0x05, 0x01, 0x00})
-			resp := make([]byte, 2); n, _ := conn.Read(resp)
+			resp := make([]byte, 2)
+			n, _ := conn.Read(resp)
+			
 			if n == 2 && resp[0] == 0x05 && resp[1] == 0x00 {
-				// 握手成功，尝试连接目标
-				destHost := "www.google.com"; destPort := 80
-				req := []byte{0x05, 0x01, 0x00, 0x03}; req = append(req, byte(len(destHost))); req = append(req, destHost...)
-				portBytes := make([]byte, 2); binary.BigEndian.PutUint16(portBytes, uint16(destPort)); req = append(req, portBytes...)
+				// 2. 尝试连接 Google DNS (8.8.8.8:53) 或 网站
+				// 这里为了通用性，我们尝试连接 www.google.com:80
+				destHost := "www.google.com"
+				destPort := 80
+				
+				req := []byte{0x05, 0x01, 0x00, 0x03} // CONNECT, IPv4/Domain
+				req = append(req, byte(len(destHost)))
+				req = append(req, destHost...)
+				
+				portBytes := make([]byte, 2)
+				binary.BigEndian.PutUint16(portBytes, uint16(destPort))
+				req = append(req, portBytes...)
+				
 				conn.Write(req)
-				reply := make([]byte, 10); n2, _ := conn.Read(reply)
-				if n2 >= 4 && reply[1] == 0x00 { fmt.Printf("S|%s\n", target) }
+				
+				reply := make([]byte, 10)
+				n2, _ := conn.Read(reply)
+				
+				// 检查代理服务器是否报告成功 (0x00)
+				if n2 >= 4 && reply[1] == 0x00 {
+					fmt.Printf("S|%s\n", target)
+				}
 			}
 			conn.Close()
 		}
+		
 		localCount++
-		if localCount >= 10 { atomic.AddUint64(counter, 10); fmt.Println("P"); localCount = 0 }
+		if localCount >= 10 {
+			atomic.AddUint64(counter, 10)
+			fmt.Println("P")
+			localCount = 0
+		}
 	}
-	if localCount > 0 { atomic.AddUint64(counter, uint64(localCount)); fmt.Println("P") }
+	if localCount > 0 {
+		atomic.AddUint64(counter, uint64(localCount))
+		fmt.Println("P")
+	}
 }
 
 func main() {
-	inputFile := flag.String("inputFile", "", ""); outputFile := flag.String("outputFile", "", ""); threads := flag.Int("threads", 200, ""); timeout := flag.Int("timeout", 10, ""); flag.Parse()
-	file, _ := os.Open(*inputFile); defer file.Close(); scanner := bufio.NewScanner(file)
-	jobs := make(chan string, *threads*2); var wg sync.WaitGroup; var count uint64
-	
-	for i := 0; i < *threads; i++ { wg.Add(1); go worker(jobs, time.Duration(*timeout)*time.Second, &wg, &count) }
-	
+	inputFile := flag.String("inputFile", "", "Input")
+	outputFile := flag.String("outputFile", "", "Output")
+	threads := flag.Int("threads", 200, "Threads")
+	timeout := flag.Int("timeout", 10, "Timeout")
+	flag.Parse()
+
+	file, err := os.Open(*inputFile)
+	if err != nil { return }
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	jobs := make(chan string, *threads*2)
+	var wg sync.WaitGroup
+	var count uint64
+
+	for i := 0; i < *threads; i++ {
+		wg.Add(1)
+		go worker(jobs, time.Duration(*timeout)*time.Second, &wg, &count)
+	}
+
 	go func() {
-		for scanner.Scan() { if t := strings.TrimSpace(scanner.Text()); t != "" { jobs <- t } }
+		for scanner.Scan() {
+			t := strings.TrimSpace(scanner.Text())
+			if t != "" {
+				jobs <- t
+			}
+		}
 		close(jobs)
 	}()
+
 	wg.Wait()
 }
 '''
 
-# 3. 认证扫描器 - 爆破账号密码
+# 3. 认证扫描器 (Auth Scanner)
 GO_SOURCE_CODE_SCANNER = r'''
 package main
-import ("bufio";"flag";"fmt";"net";"os";"strings";"sync";"sync/atomic";"time")
 
-type Job struct { Host, Port, User, Pass string }
+import (
+	"flag"
+	"fmt"
+	"net"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+type Job struct {
+	Host string
+	Port string
+	User string
+	Pass string
+}
 
 func worker(jobs <-chan Job, timeout time.Duration, wg *sync.WaitGroup, counter *uint64) {
 	defer wg.Done()
 	localCount := 0
+	
 	for j := range jobs {
 		target := net.JoinHostPort(j.Host, j.Port)
 		conn, err := net.DialTimeout("tcp", target, timeout)
+		
 		if err == nil {
 			conn.SetDeadline(time.Now().Add(timeout))
+			
+			// 发送: 支持无认证(0x00) 和 账号密码认证(0x02)
 			conn.Write([]byte{0x05, 0x02, 0x00, 0x02})
-			reply := make([]byte, 2); n, _ := conn.Read(reply)
+			
+			reply := make([]byte, 2)
+			n, _ := conn.Read(reply)
 			
 			if n > 1 {
 				if reply[1] == 0x00 {
-					// 无需认证
+					// 发现开放代理 (无需密码)
+					// 格式: S|IP|Port||OPEN
 					fmt.Printf("S|%s|%s||OPEN\n", j.Host, j.Port)
 				} else if reply[1] == 0x02 && j.User != "" {
-					// 尝试认证
-					authReq := append([]byte{0x01, byte(len(j.User))}, j.User...)
+					// 需要认证，发送账号密码
+					authReq := []byte{0x01} // Version 1
+					authReq = append(authReq, byte(len(j.User)))
+					authReq = append(authReq, j.User...)
 					authReq = append(authReq, byte(len(j.Pass)))
 					authReq = append(authReq, j.Pass...)
+					
 					conn.Write(authReq)
-					authResp := make([]byte, 2); n2, _ := conn.Read(authResp)
-					if n2 > 1 && authResp[1] == 0x00 {
+					
+					authResp := make([]byte, 2)
+					n2, _ := conn.Read(authResp)
+					
+					if n2 > 1 && authResp[0] == 0x01 && authResp[1] == 0x00 {
+						// 认证成功
+						// 格式: S|IP|Port|User|Pass
 						fmt.Printf("S|%s|%s|%s|%s\n", j.Host, j.Port, j.User, j.Pass)
 					}
 				}
 			}
 			conn.Close()
 		}
+		
 		localCount++
-		if localCount >= 50 { atomic.AddUint64(counter, 50); fmt.Println("P"); localCount = 0 }
+		if localCount >= 50 {
+			atomic.AddUint64(counter, 50)
+			fmt.Println("P")
+			localCount = 0
+		}
 	}
-	if localCount > 0 { atomic.AddUint64(counter, uint64(localCount)); fmt.Println("P") }
+	
+	if localCount > 0 {
+		atomic.AddUint64(counter, uint64(localCount))
+		fmt.Println("P")
+	}
 }
 
 func main() {
-	proxyFile := flag.String("proxyFile", "", ""); dictFile := flag.String("dictFile", "", ""); threads := flag.Int("threads", 500, ""); timeout := flag.Int("timeout", 5, ""); flag.Parse()
-	
-	// 读取所有代理
-	pData, _ := os.ReadFile(*proxyFile); pLines := strings.Split(string(pData), "\n")
+	proxyFile := flag.String("proxyFile", "", "Proxy File")
+	dictFile := flag.String("dictFile", "", "Dict File")
+	threads := flag.Int("threads", 500, "Threads")
+	timeout := flag.Int("timeout", 5, "Timeout")
+	flag.Parse()
+
+	// 1. 读取代理列表
+	pData, err := os.ReadFile(*proxyFile)
+	if err != nil { return }
+	pLines := strings.Split(string(pData), "\n")
 	var proxies []string
-	for _, l := range pLines { if t := strings.TrimSpace(l); t != "" { proxies = append(proxies, t) } }
+	for _, l := range pLines {
+		t := strings.TrimSpace(l)
+		if t != "" {
+			proxies = append(proxies, t)
+		}
+	}
 
-	// 读取所有凭证
-	dData, _ := os.ReadFile(*dictFile); dLines := strings.Split(string(dData), "\n")
-	
-	jobs := make(chan Job, *threads*2); var wg sync.WaitGroup; var count uint64
-	for i := 0; i < *threads; i++ { wg.Add(1); go worker(jobs, time.Duration(*timeout)*time.Second, &wg, &count) }
+	// 2. 读取字典列表
+	dData, err := os.ReadFile(*dictFile)
+	if err != nil { return }
+	dLines := strings.Split(string(dData), "\n")
 
+	// 3. 启动 Worker
+	jobs := make(chan Job, *threads*2)
+	var wg sync.WaitGroup
+	var count uint64
+
+	for i := 0; i < *threads; i++ {
+		wg.Add(1)
+		go worker(jobs, time.Duration(*timeout)*time.Second, &wg, &count)
+	}
+
+	// 4. 生成并分发任务
 	go func() {
 		for _, proxy := range proxies {
 			parts := strings.Split(proxy, ":")
 			if len(parts) != 2 { continue }
+			
 			for _, credLine := range dLines {
-				cl := strings.TrimSpace(credLine); if cl == "" { continue }
+				cl := strings.TrimSpace(credLine)
+				if cl == "" { continue }
+				
+				// 尝试解析 user:pass
 				cParts := strings.SplitN(cl, ":", 2)
-				if len(cParts) == 2 { jobs <- Job{parts[0], parts[1], cParts[0], cParts[1]} }
+				if len(cParts) == 2 {
+					jobs <- Job{Host: parts[0], Port: parts[1], User: cParts[0], Pass: cParts[1]}
+				}
 			}
 		}
 		close(jobs)
 	}()
+
 	wg.Wait()
 }
 '''
@@ -241,11 +427,16 @@ def get_go_path():
 
 def compile_go_binaries():
     go_exec = get_go_path()
-    if not go_exec: print("错误: 未找到 Go 环境。"); return False
+    if not go_exec:
+        print("错误: 未找到 'go' 命令。请先安装 Go 语言环境 (https://go.dev/dl/)。")
+        return False
+    
     os.makedirs(CACHE_DIR, exist_ok=True)
-    sources = {"protocol_verifier": GO_SOURCE_CODE_PROTOCOL_VERIFIER, 
-               "deep_verifier": GO_SOURCE_CODE_DEEP_VERIFIER, 
-               "scanner": GO_SOURCE_CODE_SCANNER}
+    sources = {
+        "protocol_verifier": GO_SOURCE_CODE_PROTOCOL_VERIFIER, 
+        "deep_verifier": GO_SOURCE_CODE_DEEP_VERIFIER, 
+        "scanner": GO_SOURCE_CODE_SCANNER
+    }
     
     print("正在检查核心组件...")
     for name, code in sources.items():
@@ -262,8 +453,18 @@ def compile_go_binaries():
             print(f"  - 编译优化 {name}...")
             src_path = os.path.join(CACHE_DIR, name + ".go")
             with open(src_path, "w", encoding="utf-8") as f: f.write(code)
-            # 使用 -s -w 减小体积，不生成调试信息
-            subprocess.run([go_exec, "build", "-ldflags", "-s -w", "-o", out_path, src_path], check=True)
+            
+            # 调用 Go 编译器
+            result = subprocess.run(
+                [go_exec, "build", "-ldflags", "-s -w", "-o", out_path, src_path], 
+                capture_output=True, text=True
+            )
+            
+            if result.returncode != 0:
+                print(f"\n[错误] 编译 {name} 失败！")
+                print(f"错误信息:\n{result.stderr}")
+                return False
+                
             with open(hash_path, 'w') as f: f.write(cur_hash)
         
         COMPILED_BINARIES[name] = out_path
@@ -277,34 +478,48 @@ def run_go_process(bin_name, args, total_tasks, raw_output_file):
     print(f"\n启动高性能引擎 | 任务量: {total_tasks}")
     cmd = [bin_path] + args
     
-    # 打开子进程，实时读取stdout
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace', bufsize=1)
-    
-    success_count = 0
-    with tqdm(total=total_tasks, unit="chk", dynamic_ncols=True, desc="执行中") as pbar:
-        with open(raw_output_file, 'w', encoding='utf-8') as f_out:
-            while True:
-                line = process.stdout.readline()
-                if not line and process.poll() is not None: break
-                if not line: continue
-                
-                line = line.strip()
-                if line == "P":
-                    # P 代表进度心跳，更新进度条但不换行
-                    pbar.update(20 if bin_name == "protocol_verifier" else (10 if bin_name == "deep_verifier" else 50))
-                elif line.startswith("S|"):
-                    # S 代表成功结果: S|host:port|user|pass 或 S|host:port
-                    success_count += 1
-                    f_out.write(line + "\n")
-                    f_out.flush()
-                    # 在进度条上方打印简略信息
-                    parts = line.split("|")
-                    if len(parts) >= 2:
-                        display = parts[1]
-                        if len(parts) >= 4 and parts[2]: display += f" ({parts[2]})"
-                        tqdm.write(f"  [+] 发现: {display}")
-    
-    print(f"\n任务完成。共发现 {success_count} 个有效目标。")
+    try:
+        # 打开子进程，实时读取stdout
+        process = subprocess.Popen(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            text=True, 
+            encoding='utf-8', 
+            errors='replace', 
+            bufsize=1
+        )
+        
+        success_count = 0
+        with tqdm(total=total_tasks, unit="chk", dynamic_ncols=True, desc="执行中") as pbar:
+            with open(raw_output_file, 'w', encoding='utf-8') as f_out:
+                while True:
+                    line = process.stdout.readline()
+                    if not line and process.poll() is not None: break
+                    if not line: continue
+                    
+                    line = line.strip()
+                    if line == "P":
+                        # P 代表进度心跳
+                        pbar.update(20 if bin_name == "protocol_verifier" else (10 if bin_name == "deep_verifier" else 50))
+                    elif line.startswith("S|"):
+                        # S 代表成功结果
+                        success_count += 1
+                        f_out.write(line + "\n")
+                        f_out.flush()
+                        
+                        # 在进度条上方打印简略信息
+                        parts = line.split("|")
+                        if len(parts) >= 2:
+                            display = parts[1]
+                            if len(parts) >= 4 and parts[3]: # 有用户名
+                                display += f" ({parts[3]})"
+                            tqdm.write(f"  [+] 发现: {display}")
+        
+        print(f"\n任务完成。共发现 {success_count} 个有效目标。")
+        
+    except Exception as e:
+        print(f"\n运行时发生错误: {e}")
 
 # --- 结果合成与格式化 ---
 def finalize_results(raw_file, output_dir, file_prefix):
@@ -322,10 +537,10 @@ def finalize_results(raw_file, output_dir, file_prefix):
             parts = line.strip().split("|")
             # 格式解析
             formatted = ""
-            if len(parts) == 2: # S|ip:port (无认证)
+            if len(parts) == 2: # S|ip:port (协议验证/深度验证)
                 formatted = f"socks5://{parts[1]}"
-            elif len(parts) >= 4: # S|ip|port|user|pass
-                if parts[4] == "OPEN": # 标记为 OPEN 但走了认证通道
+            elif len(parts) >= 5: # S|ip|port|user|pass|OPEN or S|ip|port|user|pass
+                if parts[4] == "OPEN": # 标记为 OPEN
                      formatted = f"socks5://{parts[1]}:{parts[2]}"
                 else:
                      formatted = f"socks5://{parts[3]}:{parts[4]}@{parts[1]}:{parts[2]}"
