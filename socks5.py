@@ -32,10 +32,10 @@ import requests
 import geoip2.database
 
 # ==========================================
-# GO 核心代码区 (极致性能版)
+# GO 核心代码区 (极致性能版 + 纯净UI)
 # ==========================================
 
-# 1. 协议验证器 (只做握手，用于快速筛选端口)
+# 1. 协议验证器
 GO_SOURCE_CODE_PROTOCOL_VERIFIER = r'''
 package main
 import ("bufio";"flag";"fmt";"net";"os";"strings";"sync";"sync/atomic";"time")
@@ -46,12 +46,10 @@ func worker(jobs <-chan string, timeout time.Duration, wg *sync.WaitGroup, count
 		conn, err := net.DialTimeout("tcp", target, timeout)
 		if err == nil {
 			conn.SetDeadline(time.Now().Add(timeout))
-			// 发送 SOCKS5 握手
 			conn.Write([]byte{0x05, 0x01, 0x00})
 			resp := make([]byte, 2)
 			n, _ := conn.Read(resp)
 			conn.Close()
-			// 只要握手成功 (无论是否需要认证)，都认为是 Socks5 端口
 			if n == 2 && resp[0] == 0x05 { fmt.Printf("S|%s\n", target) }
 		}
 		localCount++
@@ -77,53 +75,36 @@ func main() {
 }
 '''
 
-# 2. 多模式扫描器 (Public/Private/Both)
-# 原生 Go 实现所有逻辑，无 Python 延迟
+# 2. 多模式扫描器
 GO_SOURCE_CODE_SCANNER = r'''
 package main
 import ("flag";"fmt";"net";"os";"strings";"sync";"sync/atomic";"time")
 
-// ScanMode: 0=Both, 1=PublicOnly, 2=PrivateOnly
 var scanMode int
-
 type Job struct { Host string; Port string; User string; Pass string }
 
 func worker(jobs <-chan Job, timeout time.Duration, wg *sync.WaitGroup, counter *uint64) {
 	defer wg.Done()
 	localCount := 0
-	
 	for j := range jobs {
 		target := net.JoinHostPort(j.Host, j.Port)
 		conn, err := net.DialTimeout("tcp", target, timeout)
 		if err == nil {
 			conn.SetDeadline(time.Now().Add(timeout))
-			// 发送支持 NoAuth(0x00) 和 UserPass(0x02) 的请求
 			conn.Write([]byte{0x05, 0x02, 0x00, 0x02})
 			reply := make([]byte, 2)
 			n, _ := conn.Read(reply)
-			
 			if n > 1 && reply[0] == 0x05 {
 				authMethod := reply[1]
-				
-				// 逻辑分支：根据模式和服务器响应决定是否输出
-				
-				// 情况 A: 服务器无需认证 (OPEN)
 				if authMethod == 0x00 {
-					if scanMode == 0 || scanMode == 1 { // Both 或 Public
-						fmt.Printf("S|%s|%s||OPEN\n", j.Host, j.Port)
-					}
+					if scanMode == 0 || scanMode == 1 { fmt.Printf("S|%s|%s||OPEN\n", j.Host, j.Port) }
 				} else if authMethod == 0x02 {
-					// 情况 B: 服务器需要认证
-					if (scanMode == 0 || scanMode == 2) && j.User != "" { // Both 或 Private，且有字典
-						// 发送认证包
+					if (scanMode == 0 || scanMode == 2) && j.User != "" {
 						authReq := []byte{0x01}
 						authReq = append(authReq, byte(len(j.User))); authReq = append(authReq, j.User...)
 						authReq = append(authReq, byte(len(j.Pass))); authReq = append(authReq, j.Pass...)
 						conn.Write(authReq)
-						
-						authResp := make([]byte, 2)
-						n2, _ := conn.Read(authResp)
-						
+						authResp := make([]byte, 2); n2, _ := conn.Read(authResp)
 						if n2 > 1 && authResp[0] == 0x01 && authResp[1] == 0x00 {
 							fmt.Printf("S|%s|%s|%s|%s\n", j.Host, j.Port, j.User, j.Pass)
 						}
@@ -140,56 +121,37 @@ func worker(jobs <-chan Job, timeout time.Duration, wg *sync.WaitGroup, counter 
 
 func main() {
 	proxyFile := flag.String("proxyFile", "", "Proxy List")
-	dictFile := flag.String("dictFile", "", "Dict File (Optional for Public)")
+	dictFile := flag.String("dictFile", "", "Dict File")
 	mode := flag.Int("mode", 0, "0=Both, 1=Public, 2=Private")
 	threads := flag.Int("threads", 1000, "Threads")
 	timeout := flag.Int("timeout", 5, "Timeout")
 	flag.Parse()
-	
 	scanMode = *mode
-
-	// 读取代理
 	pData, _ := os.ReadFile(*proxyFile)
 	pLines := strings.Split(string(pData), "\n")
 	var proxies []string
 	for _, l := range pLines { if t := strings.TrimSpace(l); t != "" { proxies = append(proxies, t) } }
-
-	// 读取字典 (如果模式是 PublicOnly，字典可以是空的或者不存在)
 	var dLines []string
-	if *mode != 1 { // 如果不是仅跑公共，则需要字典
+	if *mode != 1 {
 		dData, _ := os.ReadFile(*dictFile)
-		dLines = strings.Split(string(dData), "\n")
-		var cleanDLines []string
-		for _, l := range dLines { if t := strings.TrimSpace(l); t != "" { cleanDLines = append(cleanDLines, t) } }
-		dLines = cleanDLines
+		lines := strings.Split(string(dData), "\n")
+		for _, l := range lines { if t := strings.TrimSpace(l); t != "" { dLines = append(dLines, t) } }
 	}
-
-	jobs := make(chan Job, *threads*2)
-	var wg sync.WaitGroup
-	var count uint64
-
+	jobs := make(chan Job, *threads*2); var wg sync.WaitGroup; var count uint64
 	for i := 0; i < *threads; i++ { wg.Add(1); go worker(jobs, time.Duration(*timeout)*time.Second, &wg, &count) }
-
 	go func() {
 		for _, proxy := range proxies {
 			parts := strings.Split(proxy, ":")
 			if len(parts) != 2 { continue }
-			
-			// 核心任务分配逻辑
 			if *mode == 1 {
-				// Public Only: 只需要跑一次 IP，不需要跑字典
 				jobs <- Job{Host: parts[0], Port: parts[1], User: "", Pass: ""}
 			} else {
-				// Private or Both: 需要跑字典
 				if len(dLines) > 0 {
 					for _, cred := range dLines {
 						cParts := strings.SplitN(cred, ":", 2)
-						if len(cParts) == 2 {
-							jobs <- Job{Host: parts[0], Port: parts[1], User: cParts[0], Pass: cParts[1]}
-						}
+						if len(cParts) == 2 { jobs <- Job{Host: parts[0], Port: parts[1], User: cParts[0], Pass: cParts[1]} }
 					}
 				} else if *mode == 0 {
-				    // 如果是 Both 模式但没字典，至少要检测 Open
 				    jobs <- Job{Host: parts[0], Port: parts[1], User: "", Pass: ""}
 				}
 			}
@@ -325,14 +287,15 @@ def run_go_process(bin_name, args, total_tasks, raw_output_file):
                 if not line and proc.poll() is not None: break
                 if not line: continue
                 line = line.strip()
-                if line == "P": pbar.update(50)
+                if line == "P": 
+                    pbar.update(50)
                 elif line.startswith("S|"):
-                    f.write(line + "\n"); f.flush()
-                    tqdm.write(f"  [+] 命中: {line.split('|')[1]}")
+                    f.write(line + "\n")
+                    f.flush()
     except Exception as e: print(f"错误: {e}")
 
 # ==========================================
-# 业务逻辑：功能分离
+# 业务逻辑
 # ==========================================
 
 # --- 模块 1: 协议探测 ---
@@ -344,56 +307,62 @@ def execute_protocol_detection(output_dir, geoip_mgr):
         return
 
     threads = input("并发线程 (默认1000): ") or "1000"
-    raw_out = os.path.join(output_dir, "raw_protocol.txt")
-    total = sum(1 for x in open(f_path, errors='ignore'))
     
-    run_go_process("protocol_verifier", ["-inputFile", f_path, "-threads", threads], total, raw_out)
-    
-    # 结果处理
-    valid_ips = []
-    if os.path.exists(raw_out):
-        with open(raw_out, 'r') as f:
-            for line in f:
-                if line.startswith("S|"): valid_ips.append(line.strip().split("|")[1])
-    
-    if not valid_ips:
-        print("[-] 未探测到有效结果。")
-        return
+    # 使用临时文件夹存放 raw 文件，避免污染当前目录
+    tdir = tempfile.mkdtemp()
+    try:
+        raw_out = os.path.join(tdir, "raw_protocol.txt")
+        total = sum(1 for x in open(f_path, errors='ignore'))
         
-    print(f"\n[+] 探测到 {len(valid_ips)} 个有效地址。")
-    
-    # 保存
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M")
-    fname = f"Protocol_Valid_{timestamp}.txt"
-    fpath = os.path.join(output_dir, fname)
-    
-    print("是否附加 GeoIP? (y/n)")
-    use_geo = input().lower() == 'y'
-    
-    with open(fpath, 'w', encoding='utf-8') as f:
-        for ip in valid_ips:
-            if use_geo:
-                info = geoip_mgr.lookup(ip.split(":")[0])
-                f.write(f"{ip} #{info}\n")
-            else:
-                f.write(f"{ip}\n")
-                
-    print(f"[完成] 结果已保存至: {fname}")
-    print(f"提示: 你可以使用该文件作为 [2. 扫描代理] 的输入。")
+        run_go_process("protocol_verifier", ["-inputFile", f_path, "-threads", threads], total, raw_out)
+        
+        valid_ips = []
+        if os.path.exists(raw_out):
+            with open(raw_out, 'r') as f:
+                for line in f:
+                    if line.startswith("S|"): valid_ips.append(line.strip().split("|")[1])
+        
+        if not valid_ips:
+            print("[-] 未探测到有效结果。")
+            return
+            
+        print(f"\n[+] 探测到 {len(valid_ips)} 个有效地址。")
+        
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M")
+        fname = f"Protocol_Valid_{timestamp}.txt"
+        fpath = os.path.join(output_dir, fname)
+        
+        print("是否附加 GeoIP? (y/n)")
+        use_geo = input().lower() == 'y'
+        
+        with open(fpath, 'w', encoding='utf-8') as f:
+            for ip in valid_ips:
+                if use_geo:
+                    info = geoip_mgr.lookup(ip.split(":")[0])
+                    f.write(f"{ip} #{info}\n")
+                else:
+                    f.write(f"{ip}\n")
+                    
+        print(f"[完成] 结果已保存至当前目录: {fname}")
+        print(f"提示: 你可以使用该文件作为 [2. 扫描代理] 的输入。")
+        
+    finally:
+        # 清理临时文件夹
+        shutil.rmtree(tdir)
 
 
 # --- 模块 2: 扫描代理 ---
 def execute_proxy_scanning(output_dir, geoip_mgr):
     print("\n[扫描代理模式] - 检测 Public/Private 代理")
-    f_path = input("输入 IP:Port 列表文件 (支持直接导入): ").strip().strip('"')
+    f_path = input("输入 IP:Port 列表文件: ").strip().strip('"')
     if not os.path.exists(f_path):
         print("文件不存在")
         return
 
     print("\n请选择扫描模式:")
-    print("  [1] Public Only (只扫免密开放代理，速度极快)")
-    print("  [2] Private Only (只扫密码认证代理)")
-    print("  [3] Both (同时扫描，自动分类)")
+    print("  [1] Public Only (只扫免密)")
+    print("  [2] Private Only (只扫密码)")
+    print("  [3] Both (混合)")
     c = input("选择: ")
     
     mode = 0
@@ -403,7 +372,6 @@ def execute_proxy_scanning(output_dir, geoip_mgr):
     try:
         if c == '1':
             mode = 1
-            # 制造空字典
             dict_file = os.path.join(tdir, "empty.txt")
             open(dict_file,'w').close()
             
@@ -435,19 +403,16 @@ def execute_proxy_scanning(output_dir, geoip_mgr):
         threads = input("并发线程 (默认1000): ") or "1000"
         raw_out = os.path.join(tdir, "raw_scan.txt")
         
-        # 任务估算
         pc = sum(1 for x in open(f_path, errors='ignore'))
         dc = 1
         if mode != 1: dc = sum(1 for x in open(dict_file))
         if dc == 0: dc = 1
         total = pc if mode == 1 else pc * dc
         
-        # 运行
         run_go_process("scanner", 
                       ["-proxyFile", f_path, "-dictFile", dict_file, "-mode", str(mode), "-threads", threads],
                       total, raw_out)
         
-        # 结果分类保存
         public_set = set()
         private_set = set()
         
@@ -493,18 +458,18 @@ def main():
     geoip = GeoIPManager()
     geoip.ensure_databases()
     
-    out_dir = f"Session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    os.makedirs(out_dir, exist_ok=True)
+    # 修改：直接使用当前目录作为输出目录
+    out_dir = "."
     
     print("\n" + "="*50)
-    print(" Socks5 Toolkit (Decoupled Mode)")
+    print(" Socks5 Toolkit (Clean UI & Flat Output)")
     print("="*50)
 
     try:
         while True:
             print("\n--- 功能菜单 ---")
-            print("  [1] 协议探测 (只筛选 Socks5 端口)")
-            print("  [2] 扫描代理 (检测 Public/Private 可用性)")
+            print("  [1] 协议探测 (Protocol Detection)")
+            print("  [2] 扫描代理 (Proxy Scanning)")
             print("  [q] 退出")
             
             c = input("\n请选择: ").lower()
