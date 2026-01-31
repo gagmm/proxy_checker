@@ -71,20 +71,20 @@ def send_telegram_file(config, file_path):
     try:
         url = f"https://api.telegram.org/bot{config['bot_token']}/sendDocument"
         count = sum(1 for _ in open(file_path, 'r', encoding='utf-8', errors='ignore'))
-        caption = (f"🔍 任务完成\n"
+        caption = (f"🔍 深度验证完成 (L7 Check)\n"
                    f"🏷 {config.get('custom_id_key', 'VPS')}: {config.get('custom_id_value', '')}\n"
                    f"📁 文件: {os.path.basename(file_path)}\n"
-                   f"📊 数量: {count}")
+                   f"📊 有效存活: {count}")
         with open(file_path, 'rb') as f:
             requests.post(url, files={'document': f}, data={'chat_id': config['chat_id'], 'caption': caption}, timeout=30)
         print("完成")
     except Exception as e: print(f"失败: {e}")
 
 # ==========================================
-# GO 核心代码区 (流水线模式 - 极速)
+# GO 核心代码区 (已升级 L7 验证)
 # ==========================================
 
-# 1. 协议验证器
+# 1. 协议验证器 (纯净版 - 无 unused variable)
 GO_SOURCE_CODE_PROTOCOL_VERIFIER = r'''
 package main
 import ("bufio";"flag";"fmt";"net";"os";"strings";"sync";"sync/atomic";"time")
@@ -124,9 +124,8 @@ func main() {
 }
 '''
 
-# 2. 深度扫描器 (Pipeline Mode)
-# 逻辑：认证失败 -> 立即挂断 (耗时极低)
-#       认证成功 -> 保持连接 -> 尝试 CONNECT (复用连接，耗时最低)
+# 2. 深度扫描器 (Scanner - L7 HTTP Check)
+# 核心修改：verifyTraffic 现在会发送 HTTP HEAD 请求并检查 "HTTP/" 响应头
 GO_SOURCE_CODE_SCANNER = r'''
 package main
 import ("flag";"fmt";"net";"os";"strings";"sync";"sync/atomic";"time";"encoding/binary")
@@ -134,9 +133,9 @@ import ("flag";"fmt";"net";"os";"strings";"sync";"sync/atomic";"time";"encoding/
 var scanMode int
 type Job struct { Host string; Port string; User string; Pass string }
 
-// 快速联网检测
+// L7 应用层验证：确保代理不仅能握手，还能转发 HTTP 流量
 func verifyTraffic(conn net.Conn) bool {
-    // 尝试连接 www.microsoft.com:80 (体积极小的请求)
+    // 1. 发送 SOCKS5 CONNECT 请求到 www.microsoft.com:80
     domain := "www.microsoft.com"
     req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(domain))}
     req = append(req, domain...)
@@ -145,15 +144,33 @@ func verifyTraffic(conn net.Conn) bool {
     binary.BigEndian.PutUint16(portBytes, 80)
     req = append(req, portBytes...)
     
-    conn.SetDeadline(time.Now().Add(5 * time.Second))
+    conn.SetDeadline(time.Now().Add(8 * time.Second)) // 稍微放宽超时以允许 HTTP 回包
     if _, err := conn.Write(req); err != nil { return false }
     
-    resp := make([]byte, 10)
-    n, err := conn.Read(resp)
-    if err != nil || n < 2 { return false }
+    // 读取 SOCKS5 响应 (0x05 0x00 ...)
+    socksResp := make([]byte, 10)
+    n, err := conn.Read(socksResp)
+    if err != nil || n < 2 || socksResp[1] != 0x00 { return false }
     
-    // 0x00 表示成功连接，证明代理拥有转发权限
-    return resp[0] == 0x05 && resp[1] == 0x00
+    // 2. 发送真实 HTTP HEAD 请求
+    // 这是过滤 "僵尸代理" 的关键步骤
+    httpReq := "HEAD / HTTP/1.1\r\nHost: www.microsoft.com\r\nUser-Agent: Go-Scanner\r\nConnection: Close\r\n\r\n"
+    if _, err := conn.Write([]byte(httpReq)); err != nil { return false }
+    
+    // 3. 读取 HTTP 响应
+    httpBuf := make([]byte, 512)
+    n, err = conn.Read(httpBuf)
+    if err != nil || n <= 0 { return false }
+    
+    response := string(httpBuf[:n])
+    
+    // 4. 验证是否为有效 HTTP 响应 (必须包含 "HTTP/")
+    // 这能有效过滤掉那些发送乱码或 code=9 的坏代理
+    if strings.Contains(response, "HTTP/") {
+        return true
+    }
+    
+    return false
 }
 
 func worker(jobs <-chan Job, timeout time.Duration, wg *sync.WaitGroup, counter *uint64) {
@@ -165,6 +182,7 @@ func worker(jobs <-chan Job, timeout time.Duration, wg *sync.WaitGroup, counter 
 		conn, err := net.DialTimeout("tcp", target, timeout)
 		if err == nil {
 			conn.SetDeadline(time.Now().Add(timeout))
+			// SOCKS5 握手
 			conn.Write([]byte{0x05, 0x02, 0x00, 0x02})
 			reply := make([]byte, 2)
 			n, _ := conn.Read(reply)
@@ -172,16 +190,15 @@ func worker(jobs <-chan Job, timeout time.Duration, wg *sync.WaitGroup, counter 
 			if n > 1 && reply[0] == 0x05 {
 				authMethod := reply[1]
 				
-				// 1. 免密模式
+				// 分支 A: 免密
 				if authMethod == 0x00 {
 					if scanMode == 0 || scanMode == 1 { 
-                        // 认证已通过，立即在同一连接中测试联网
                         if verifyTraffic(conn) {
 						    fmt.Printf("S|%s|%s||OPEN\n", j.Host, j.Port) 
                         }
 					}
 				} else if authMethod == 0x02 {
-				// 2. 密码模式
+				// 分支 B: 密码
 					if (scanMode == 0 || scanMode == 2) && j.User != "" {
 						authReq := []byte{0x01}
 						authReq = append(authReq, byte(len(j.User))); authReq = append(authReq, j.User...)
@@ -191,14 +208,11 @@ func worker(jobs <-chan Job, timeout time.Duration, wg *sync.WaitGroup, counter 
 						authResp := make([]byte, 2)
 						n2, _ := conn.Read(authResp)
 						
-                        // 只有密码正确 (0x00) 才会进入 verifyTraffic
 						if n2 > 1 && authResp[0] == 0x01 && authResp[1] == 0x00 {
-                            // 密码正确，立即复用连接测试联网
                             if verifyTraffic(conn) {
 							    fmt.Printf("S|%s|%s|%s|%s\n", j.Host, j.Port, j.User, j.Pass)
                             }
 						}
-                        // 如果密码错误，循环直接结束，不会浪费时间去 CONNECT
 					}
 				}
 			}
@@ -335,7 +349,6 @@ class GeoIPManager:
 # ==========================================
 # 工具函数
 # ==========================================
-COMPILED_BINARIES = {}
 CACHE_DIR = ".socks5_toolkit_cache"
 
 def get_go_path():
@@ -348,6 +361,12 @@ def get_go_path():
 def compile_go_binaries():
     go_exec = get_go_path()
     if not go_exec: print("错误: 未找到 Go 环境"); return False
+    
+    # 强制清理旧缓存，解决 'outputFile' 编译错误
+    if os.path.exists(CACHE_DIR):
+        try: shutil.rmtree(CACHE_DIR)
+        except: pass
+        
     os.makedirs(CACHE_DIR, exist_ok=True)
     sources = {"protocol_verifier": GO_SOURCE_CODE_PROTOCOL_VERIFIER, "scanner": GO_SOURCE_CODE_SCANNER}
     build_env = os.environ.copy()
@@ -356,27 +375,23 @@ def compile_go_binaries():
     build_env['GOCACHE'] = os.path.join(temp_base, 'go_build_cache')
     os.makedirs(build_env['GOCACHE'], exist_ok=True)
 
-    print("正在检查核心组件 (Pipeline模式)...")
+    print("正在编译核心组件 (强制刷新)...")
     for name, code in sources.items():
         out_path = os.path.join(CACHE_DIR, name + (".exe" if sys.platform=="win32" else ""))
-        hash_path = os.path.join(CACHE_DIR, name + ".hash")
-        cur_hash = hashlib.sha256(code.encode()).hexdigest()
+        src_path = os.path.join(CACHE_DIR, name + ".go")
         
-        if not (os.path.exists(out_path) and os.path.exists(hash_path) and open(hash_path).read() == cur_hash):
-            print(f"  - 编译 {name}...")
-            src_path = os.path.join(CACHE_DIR, name + ".go")
-            with open(src_path, "w", encoding="utf-8") as f: f.write(code)
-            res = subprocess.run([go_exec, "build", "-ldflags", "-s -w", "-o", out_path, src_path], capture_output=True, env=build_env)
-            if res.returncode != 0:
-                print(f"编译失败: {res.stderr.decode()}")
-                return False
-            with open(hash_path, 'w') as f: f.write(cur_hash)
-        COMPILED_BINARIES[name] = out_path
+        with open(src_path, "w", encoding="utf-8") as f: f.write(code)
+        
+        res = subprocess.run([go_exec, "build", "-ldflags", "-s -w", "-o", out_path, src_path], capture_output=True, env=build_env)
+        if res.returncode != 0:
+            print(f"[致命错误] 编译 {name} 失败:\n{res.stderr.decode()}")
+            return False
+            
     return True
 
-def run_go_process(bin_name, args, total_tasks, raw_output_file):
-    bin_path = COMPILED_BINARIES.get(bin_name)
-    if not bin_path: return
+def run_go_process(bin_name, args, total_tasks, raw_output_file, bin_map):
+    bin_path = os.path.join(CACHE_DIR, bin_name + (".exe" if sys.platform=="win32" else ""))
+    if not os.path.exists(bin_path): return
     print(f"\n启动引擎 | 任务量: {total_tasks}")
     
     success_count = 0
@@ -414,7 +429,7 @@ def execute_protocol_detection(config, geoip_mgr):
         raw_out = os.path.join(tdir, "raw_proto.txt")
         total = sum(1 for x in open(f_path, errors='ignore'))
         
-        run_go_process("protocol_verifier", ["-inputFile", f_path, "-threads", threads], total, raw_out)
+        run_go_process("protocol_verifier", ["-inputFile", f_path, "-threads", threads], total, raw_out, {})
         
         valid_ips = []
         if os.path.exists(raw_out):
@@ -443,7 +458,7 @@ def execute_protocol_detection(config, geoip_mgr):
     finally: shutil.rmtree(tdir)
 
 def execute_proxy_scanning(config, geoip_mgr):
-    print("\n[代理扫描] - 深度检测 (CONNECT Microsoft)")
+    print("\n[代理扫描] - 深度检测 (L7 HTTP Check)")
     f_path = input("输入文件: ").strip().strip('"')
     if not os.path.exists(f_path): return
 
@@ -488,7 +503,7 @@ def execute_proxy_scanning(config, geoip_mgr):
         
         run_go_process("scanner", 
                       ["-proxyFile", f_path, "-dictFile", dict_file, "-mode", str(mode), "-threads", threads],
-                      total, raw_out)
+                      total, raw_out, {})
         
         pub, priv = set(), set()
         if os.path.exists(raw_out):
@@ -528,7 +543,7 @@ def main():
     config = load_config()
     
     print("\n" + "="*50)
-    print(" Socks5 Toolkit (Pipeline Mode)")
+    print(" Socks5 Toolkit (Strict L7 Edition)")
     print("="*50)
 
     try:
