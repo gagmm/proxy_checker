@@ -32,7 +32,76 @@ import requests
 import geoip2.database
 
 # ==========================================
-# GO 核心代码区 (极致性能版 + 纯净UI)
+# 配置与 Telegram 模块
+# ==========================================
+CONFIG_FILE = "config.json"
+
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        return {"bot_token": "", "chat_id": "", "custom_id_key": "VPS", "custom_id_value": ""}
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f: return json.load(f)
+    except: return {"bot_token": "", "chat_id": "", "custom_id_key": "VPS", "custom_id_value": ""}
+
+def save_config(config):
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f: json.dump(config, f, indent=4)
+
+def handle_config_menu(config):
+    while True:
+        print("\n--- 设置菜单 ---")
+        print(f"  [1] Bot Token:         {'*' * 10 if config.get('bot_token') else '未设置'}")
+        print(f"  [2] Chat ID:           {config.get('chat_id') or '未设置'}")
+        print(f"  [3] 自定义标识名:    {config.get('custom_id_key') or 'VPS'}")
+        print(f"  [4] 自定义标识值:    {config.get('custom_id_value') or '未设置'}")
+        print("\n  [b] 返回主菜单")
+        
+        choice = input("\n请选择要修改的项: ").lower()
+        if choice == '1': config['bot_token'] = input("Bot Token: ").strip()
+        elif choice == '2': config['chat_id'] = input("Chat ID: ").strip()
+        elif choice == '3': config['custom_id_key'] = input("标识名: ").strip()
+        elif choice == '4': config['custom_id_value'] = input("标识值: ").strip()
+        elif choice == 'b': break
+        save_config(config)
+
+def send_telegram_file(config, file_path):
+    """自动发送文件到 Telegram"""
+    if not config.get("bot_token") or not config.get("chat_id"):
+        return
+
+    if not os.path.exists(file_path): return
+
+    print(f" >> 正在推送 {os.path.basename(file_path)} 到 Telegram...", end=" ")
+    
+    try:
+        url = f"https://api.telegram.org/bot{config['bot_token']}/sendDocument"
+        
+        # 计算行数作为统计
+        count = 0
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            count = sum(1 for _ in f)
+            
+        caption = (f"🔍 任务完成\n"
+                   f"🏷 {config.get('custom_id_key', 'VPS')}: {config.get('custom_id_value', '')}\n"
+                   f"📁 文件: {os.path.basename(file_path)}\n"
+                   f"📊 数量: {count}")
+
+        with open(file_path, 'rb') as f:
+            resp = requests.post(
+                url, 
+                files={'document': f}, 
+                data={'chat_id': config['chat_id'], 'caption': caption},
+                timeout=30
+            )
+            
+        if resp.status_code == 200:
+            print("成功!")
+        else:
+            print(f"失败 ({resp.status_code})")
+    except Exception as e:
+        print(f"出错: {e}")
+
+# ==========================================
+# GO 核心代码区
 # ==========================================
 
 # 1. 协议验证器
@@ -279,9 +348,13 @@ def run_go_process(bin_name, args, total_tasks, raw_output_file):
     bin_path = COMPILED_BINARIES.get(bin_name)
     if not bin_path: return
     print(f"\n启动引擎 | 任务量: {total_tasks}")
+    
+    success_count = 0
     try:
         proc = subprocess.Popen([bin_path] + args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1)
+        
         with tqdm(total=total_tasks, unit="chk", dynamic_ncols=True, mininterval=0.5) as pbar, open(raw_output_file, 'w', encoding='utf-8') as f:
+            pbar.set_postfix(命中=0)
             while True:
                 line = proc.stdout.readline()
                 if not line and proc.poll() is not None: break
@@ -290,8 +363,10 @@ def run_go_process(bin_name, args, total_tasks, raw_output_file):
                 if line == "P": 
                     pbar.update(50)
                 elif line.startswith("S|"):
+                    success_count += 1
                     f.write(line + "\n")
                     f.flush()
+                    pbar.set_postfix(命中=success_count)
     except Exception as e: print(f"错误: {e}")
 
 # ==========================================
@@ -299,7 +374,7 @@ def run_go_process(bin_name, args, total_tasks, raw_output_file):
 # ==========================================
 
 # --- 模块 1: 协议探测 ---
-def execute_protocol_detection(output_dir, geoip_mgr):
+def execute_protocol_detection(config, geoip_mgr):
     print("\n[协议探测模式] - 筛选开放 Socks5 端口")
     f_path = input("输入 IP:Port 列表文件: ").strip().strip('"')
     if not os.path.exists(f_path):
@@ -308,7 +383,6 @@ def execute_protocol_detection(output_dir, geoip_mgr):
 
     threads = input("并发线程 (默认1000): ") or "1000"
     
-    # 使用临时文件夹存放 raw 文件，避免污染当前目录
     tdir = tempfile.mkdtemp()
     try:
         raw_out = os.path.join(tdir, "raw_protocol.txt")
@@ -330,12 +404,11 @@ def execute_protocol_detection(output_dir, geoip_mgr):
         
         timestamp = datetime.now().strftime("%Y%m%d-%H%M")
         fname = f"Protocol_Valid_{timestamp}.txt"
-        fpath = os.path.join(output_dir, fname)
         
         print("是否附加 GeoIP? (y/n)")
         use_geo = input().lower() == 'y'
         
-        with open(fpath, 'w', encoding='utf-8') as f:
+        with open(fname, 'w', encoding='utf-8') as f:
             for ip in valid_ips:
                 if use_geo:
                     info = geoip_mgr.lookup(ip.split(":")[0])
@@ -343,16 +416,16 @@ def execute_protocol_detection(output_dir, geoip_mgr):
                 else:
                     f.write(f"{ip}\n")
                     
-        print(f"[完成] 结果已保存至当前目录: {fname}")
+        print(f"[完成] 结果已保存: {fname}")
+        send_telegram_file(config, fname) # 自动推送
         print(f"提示: 你可以使用该文件作为 [2. 扫描代理] 的输入。")
         
     finally:
-        # 清理临时文件夹
         shutil.rmtree(tdir)
 
 
 # --- 模块 2: 扫描代理 ---
-def execute_proxy_scanning(output_dir, geoip_mgr):
+def execute_proxy_scanning(config, geoip_mgr):
     print("\n[扫描代理模式] - 检测 Public/Private 代理")
     f_path = input("输入 IP:Port 列表文件: ").strip().strip('"')
     if not os.path.exists(f_path):
@@ -431,11 +504,10 @@ def execute_proxy_scanning(output_dir, geoip_mgr):
         print("\n是否附加 GeoIP? (y/n)")
         use_geo = input().lower() == 'y'
         
-        def save(data, prefix):
+        def save_and_send(data, prefix):
             if not data: return
             fn = f"{prefix}_{timestamp}.txt"
-            fp = os.path.join(output_dir, fn)
-            with open(fp, 'w') as f:
+            with open(fn, 'w') as f:
                 for item in sorted(list(data)):
                     if use_geo:
                         ip = item.split("@")[1].split(":")[0] if "@" in item else item.split("//")[1].split(":")[0]
@@ -444,9 +516,10 @@ def execute_proxy_scanning(output_dir, geoip_mgr):
                     else:
                         f.write(f"{item}\n")
             print(f"[保存] {prefix}: {len(data)} 条 -> {fn}")
+            send_telegram_file(config, fn) # 自动推送
             
-        if public_set: save(public_set, "Public_Proxies")
-        if private_set: save(private_set, "Private_Proxies")
+        if public_set: save_and_send(public_set, "Public_Proxies")
+        if private_set: save_and_send(private_set, "Private_Proxies")
         if not public_set and not private_set: print("[-] 未扫描到有效结果")
             
     finally:
@@ -457,12 +530,10 @@ def main():
     if not compile_go_binaries(): sys.exit(1)
     geoip = GeoIPManager()
     geoip.ensure_databases()
-    
-    # 修改：直接使用当前目录作为输出目录
-    out_dir = "."
+    config = load_config()
     
     print("\n" + "="*50)
-    print(" Socks5 Toolkit (Clean UI & Flat Output)")
+    print(" Socks5 Toolkit (Complete & Clean)")
     print("="*50)
 
     try:
@@ -470,14 +541,17 @@ def main():
             print("\n--- 功能菜单 ---")
             print("  [1] 协议探测 (Protocol Detection)")
             print("  [2] 扫描代理 (Proxy Scanning)")
+            print("  [3] 设置 (Settings)")
             print("  [q] 退出")
             
             c = input("\n请选择: ").lower()
             
             if c == '1':
-                execute_protocol_detection(out_dir, geoip)
+                execute_protocol_detection(config, geoip)
             elif c == '2':
-                execute_proxy_scanning(out_dir, geoip)
+                execute_proxy_scanning(config, geoip)
+            elif c == '3':
+                handle_config_menu(config)
             elif c == 'q':
                 break
             else:
